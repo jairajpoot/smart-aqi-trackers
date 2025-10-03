@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart AQI Tracker</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Load Chart.js for visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+    <!-- Custom Tailwind Configuration for smooth UI -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        // Custom AQI Colors (based on US EPA categories)
+                        'aqi-good': '#50a350', // Green
+                        'aqi-moderate': '#ffcc00', // Yellow
+                        'aqi-sensitive': '#ff9900', // Orange
+                        'aqi-unhealthy': '#ff5555', // Red
+                        'aqi-vunhealthy': '#993399', // Purple
+                        'aqi-hazardous': '#660000', // Maroon
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                    keyframes: {
+                        fadeIn: {
+                            '0%': { opacity: '0', transform: 'translateY(10px)' },
+                            '100%': { opacity: '1', transform: 'translateY(0)' },
+                        },
+                        pulseBg: {
+                            '0%, 100%': { opacity: '0.9' },
+                            '50%': { opacity: '1' },
+                        }
+                    },
+                    animation: {
+                        fadeIn: 'fadeIn 0.5s ease-out',
+                        pulseBg: 'pulseBg 2s ease-in-out infinite',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        /* Base styles for the mobile-first SPA container */
+        body {
+            background-color: #f7f9fc;
+            font-family: 'Inter', sans-serif;
+        }
+        #app-container {
+            max-width: 420px; /* Standard mobile width */
+            margin: 0 auto;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+            background-color: white;
+            position: relative;
+        }
+        /* Custom scrollbar for favorites row */
+        .horizontal-scroll::-webkit-scrollbar {
+            display: none;
+        }
+        .horizontal-scroll {
+            -ms-overflow-style: none; /* IE and Edge */
+            scrollbar-width: none; /* Firefox */
+        }
+    </style>
+</head>
+<body class="selection:bg-indigo-200">
+
+<div id="app-container">
+    <!-- Main Content Area -->
+    <div id="screen-content" class="flex-grow p-4 pb-20 overflow-y-auto">
+        <!-- Content injected here by JavaScript -->
+    </div>
+
+    <!-- Bottom Navigation Bar (Fixed) -->
+    <div id="nav-bar" class="fixed bottom-0 left-0 right-0 max-w-[420px] mx-auto bg-white border-t border-gray-200 shadow-xl flex justify-around items-center h-16 z-50">
+        <!-- Navigation buttons rendered by JS -->
+    </div>
+</div>
+
+<script>
+    // --- Mock Data and Core Logic ---
+
+    // US EPA AQI Categories and Colors
+    const AQI_RANGES = [
+        { min: 0, max: 50, name: "Good", color: "aqi-good", emoji: "😊" },
+        { min: 51, max: 100, name: "Moderate", color: "aqi-moderate", emoji: "🙂" },
+        { min: 101, max: 150, name: "Unhealthy for Sensitive Groups", color: "aqi-sensitive", emoji: "😷" },
+        { min: 151, max: 200, name: "Unhealthy", color: "aqi-unhealthy", emoji: "😟" },
+        { min: 201, max: 300, name: "Very Unhealthy", color: "aqi-vunhealthy", emoji: "😥" },
+        { min: 301, max: 500, name: "Hazardous", color: "aqi-hazardous", emoji: "💀" },
+    ];
+
+    const POLLUTANTS = ["PM2.5", "PM10", "O3", "NO2", "SO2", "CO"];
+
+    const MOCK_DATA = {
+        "delhi": { id: "delhi", name: "New Delhi", aqi: 215, weather: { temp: 28, humidity: 55, wind: 8 } },
+        "mumbai": { id: "mumbai", name: "Mumbai", aqi: 98, weather: { temp: 30, humidity: 70, wind: 12 } },
+        "bangalore": { id: "bangalore", name: "Bengaluru", aqi: 45, weather: { temp: 25, humidity: 60, wind: 5 } },
+        "chennai": { id: "chennai", name: "Chennai", aqi: 155, weather: { temp: 32, humidity: 80, wind: 15 } },
+        "kolkata": { id: "kolkata", name: "Kolkata", aqi: 110, weather: { temp: 27, humidity: 75, wind: 10 } }
+    };
+
+    // Global State
+    const state = {
+        currentScreen: 'home', // home, detail, trends, map, compare, settings
+        selectedCityId: 'delhi',
+        favorites: ['delhi', 'bangalore', 'chennai'],
+        comparisonCities: ['mumbai', 'kolkata'],
+        autoSuggestList: Object.values(MOCK_DATA).map(c => c.name),
+        searchQuery: '',
+    };
+
+    /**
+     * Finds the AQI category object based on the AQI value.
+     * @param {number} aqiValue
+     * @returns {object}
+     */
+    function getAqiCategory(aqiValue) {
+        return AQI_RANGES.find(r => aqiValue >= r.min && aqiValue <= r.max) || AQI_RANGES[AQI_RANGES.length - 1];
+    }
+
+    /**
+     * Generates simulated prediction data for the next 6 hours.
+     * Logic: A slight fluctuation around the current AQI, trending slightly up or down.
+     * @param {number} currentAqi
+     * @returns {Array<{hour: string, aqi: number}>}
+     */
+    function generatePredictionData(currentAqi) {
+        const trendDirection = (Math.random() > 0.5) ? 1 : -1; // Randomly trend up or down
+        const data = [];
+        let aqi = currentAqi;
+        for (let i = 0; i <= 6; i++) {
+            const fluctuation = (Math.random() - 0.5) * 15; // Small random change
+            const baseChange = trendDirection * i * 3; // Overall trend
+            aqi = Math.round(Math.max(20, aqi + fluctuation + baseChange)); // Ensure AQI doesn't go below 20
+            data.push({
+                hour: `+${i}h`,
+                aqi: aqi
+            });
+        }
+        return data.slice(1); // Return next 6 hours (excluding current hour)
+    }
+
+    /**
+     * Generates mock pollutant and recommendation data for a city.
+     * @param {string} cityId
+     * @returns {object}
+     */
+    function getCityDetails(cityId) {
+        const base = MOCK_DATA[cityId];
+        const category = getAqiCategory(base.aqi);
+
+        const pollutants = POLLUTANTS.map(p => {
+            let value = Math.round(base.aqi * (Math.random() * 0.4 + 0.3)); // Value proportional to AQI
+            let pCategory = getAqiCategory(value);
+            return {
+                name: p,
+                value: value,
+                color: pCategory.color,
+                impact: pCategory.name,
+                icon: (p === 'PM2.5' || p === 'PM10') ? 'cloud-fog' : (p === 'O3' ? 'sun' : 'factory'),
+            }
+        });
+
+        let recommendation = "Air quality is good. Enjoy outdoor activities.";
+        if (base.aqi > 100) {
+            recommendation = `Air quality is ${category.name}. Limit heavy outdoor exertion. Sensitive groups should stay indoors.`;
+        }
+        if (base.aqi > 200) {
+            recommendation = `Air quality is ${category.name}. All individuals should avoid outdoor activities. Wear an N95 mask if unavoidable.`;
+        }
+
+        return {
+            ...base,
+            category: category,
+            pollutants: pollutants,
+            prediction: generatePredictionData(base.aqi),
+            recommendation: recommendation,
+        };
+    }
+
+    // --- Utility Rendering Functions ---
+
+    /**
+     * Gets the full HTML string for a Lucide icon.
+     * @param {string} iconName
+     * @param {string} classes
+     * @returns {string}
+     */
+    function getIcon(iconName, classes = 'w-6 h-6') {
+        const icon = lucide.icons[iconName];
+        if (!icon) return '';
+        const svg = icon.toSvg({ class: classes });
+        // The library adds width/height attributes which interfere with Tailwind classes, so we remove them
+        return svg.replace(/width="\d+"/, '').replace(/height="\d+"/, '');
+    }
+
+    /**
+     * Renders the AQI badge card.
+     * @param {object} city
+     * @param {boolean} isLarge
+     * @returns {string}
+     */
+    function renderAqiBadge(city, isLarge = false) {
+        const details = getCityDetails(city.id);
+        const sizeClass = isLarge ? 'p-6 text-5xl' : 'p-3 text-3xl';
+        const nameClass = isLarge ? 'text-xl' : 'text-sm';
+
+        return `
+            <div onclick="navigateTo('detail', '${city.id}')" class="flex-shrink-0 cursor-pointer w-full md:w-auto h-full rounded-2xl shadow-lg hover:shadow-xl transition-shadow duration-300 ${isLarge ? 'h-52' : 'h-36'} overflow-hidden">
+                <div class="h-full flex flex-col justify-between p-4 bg-gradient-to-br from-${details.category.color} to-${details.category.color}/70 text-white animation-pulseBg">
+                    <div class="flex items-center justify-between">
+                        <span class="font-bold ${nameClass} leading-tight">${city.name}</span>
+                        ${getIcon('chevron-right', 'w-5 h-5')}
+                    </div>
+                    <div class="flex flex-col items-start">
+                        <span class="font-extrabold ${sizeClass}">${city.aqi}</span>
+                        <span class="text-sm font-medium opacity-90">${details.category.name} ${details.category.emoji}</span>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    // --- Screen Rendering Functions ---
+
+    function renderHome() {
+        const defaultCity = getCityDetails(state.selectedCityId);
+        const favoriteCities = state.favorites.map(id => MOCK_DATA[id]);
+
+        const content = `
+            <div class="animate-fadeIn space-y-6">
+                <h1 class="text-3xl font-bold text-gray-800 pt-2">Hello, Hackers!</h1>
+
+                <!-- Search Bar -->
+                <div class="relative">
+                    <div class="flex items-center bg-gray-100 rounded-xl p-3 shadow-inner">
+                        <div class="text-gray-500 mr-2">${getIcon('search', 'w-5 h-5')}</div>
+                        <input
+                            type="text"
+                            id="search-input"
+                            placeholder="Search city or location (e.g., Delhi)"
+                            oninput="handleSearchInput(event)"
+                            class="flex-grow bg-transparent focus:outline-none text-gray-700"
+                        >
+                    </div>
+                    <!-- Auto-suggest Dropdown -->
+                    <div id="autocomplete-results" class="absolute w-full mt-1 bg-white border border-gray-200 rounded-xl shadow-lg max-h-40 overflow-y-auto hidden z-10">
+                        <!-- Results injected here -->
+                    </div>
+                </div>
+
+                <!-- Quick Info Card (Default City) -->
+                <div class="space-y-3">
+                    <h2 class="text-xl font-semibold text-gray-800">Current Status</h2>
+                    ${renderAqiBadge(defaultCity, true)}
+                </div>
+
+                <!-- Favorites Row -->
+                <div class="space-y-3">
+                    <h2 class="text-xl font-semibold text-gray-800">Your Favorites</h2>
+                    <div class="flex space-x-4 overflow-x-auto horizontal-scroll py-2">
+                        ${favoriteCities.map(city => `
+                            <div class="flex-shrink-0 w-40">
+                                ${renderAqiBadge(city, false)}
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+            </div>
+        `;
+        document.getElementById('screen-content').innerHTML = content;
+        // Re-initialize the search bar state
+        document.getElementById('search-input').value = state.searchQuery;
+        // Update the screen title
+        updateScreenTitle('Home');
+    }
+
+    function renderDetail(cityId) {
+        const details = getCityDetails(cityId);
+
+        // Calculate next 6-hour trend summary
+        const prediction = details.prediction;
+        const currentAqi = details.aqi;
+        const lastAqi = prediction[prediction.length - 1].aqi;
+        const trendIcon = lastAqi > currentAqi ? 'trending-up' : (lastAqi < currentAqi ? 'trending-down' : 'minus');
+        const trendText = lastAqi > currentAqi ? 'Rising Trend' : (lastAqi < currentAqi ? 'Falling Trend' : 'Stable');
+
+        const content = `
+            <div class="animate-fadeIn space-y-6">
+                <!-- Back Button -->
+                <button onclick="navigateTo('home')" class="text-indigo-600 flex items-center mb-4">
+                    ${getIcon('chevron-left', 'w-5 h-5 mr-1')}
+                    <span class="font-medium">Back to Home</span>
+                </button>
+
+                <h1 class="text-3xl font-bold text-gray-800">${details.name}</h1>
+
+                <!-- Overall AQI Badge -->
+                <div class="p-6 rounded-2xl shadow-xl text-center bg-gradient-to-r from-${details.category.color}/90 to-${details.category.color} text-white transition duration-500">
+                    <span class="text-7xl font-extrabold block">${details.aqi}</span>
+                    <span class="text-xl font-medium block">${details.category.name} ${details.category.emoji}</span>
+                    <p class="text-sm opacity-80 mt-1">Updated 5 minutes ago</p>
+                </div>
+
+                <!-- AQI Trend Prediction Card -->
+                <div class="bg-white p-4 rounded-xl shadow-md space-y-3">
+                    <h2 class="text-xl font-semibold text-gray-800">Next 6-Hour Prediction</h2>
+                    <div id="prediction-chart-container" class="h-48">
+                        <canvas id="predictionChart"></canvas>
+                    </div>
+                    <div class="flex items-center justify-center p-2 rounded-lg bg-gray-100/70">
+                        ${getIcon(trendIcon, 'w-5 h-5 mr-2 text-indigo-600')}
+                        <span class="text-md font-medium text-gray-700">${trendText}: Expected to be ${lastAqi}</span>
+                    </div>
+                </div>
+
+                <!-- Pollutant Breakdown -->
+                <h2 class="text-xl font-semibold text-gray-800">Pollutant Breakdown</h2>
+                <div class="grid grid-cols-2 gap-4">
+                    ${details.pollutants.map(p => `
+                        <div class="bg-white p-4 rounded-xl shadow-md border-l-4 border-${p.color}">
+                            <div class="flex items-center justify-between">
+                                <span class="text-xs font-medium text-gray-500">${p.name}</span>
+                                ${getIcon(p.icon, 'w-5 h-5 text-gray-400')}
+                            </div>
+                            <span class="text-3xl font-bold block mt-1">${p.value}</span>
+                            <span class="text-sm text-gray-600">${p.impact}</span>
+                        </div>
+                    `).join('')}
+                </div>
+
+                <!-- Weather and Recommendation -->
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="bg-white p-4 rounded-xl shadow-md border-t-4 border-indigo-500">
+                        <h3 class="font-semibold text-lg mb-2">Weather</h3>
+                        <p class="flex items-center text-gray-700">${getIcon('thermometer', 'w-4 h-4 mr-2')} Temp: ${details.weather.temp}°C</p>
+                        <p class="flex items-center text-gray-700">${getIcon('droplets', 'w-4 h-4 mr-2')} Humidity: ${details.weather.humidity}%</p>
+                        <p class="flex items-center text-gray-700">${getIcon('wind', 'w-4 h-4 mr-2')} Wind: ${details.weather.wind} km/h</p>
+                    </div>
+                    <div class="bg-white p-4 rounded-xl shadow-md border-t-4 border-${details.category.color}">
+                        <h3 class="font-semibold text-lg mb-2 text-gray-800">Health Alert</h3>
+                        <p class="text-sm text-gray-700">${details.recommendation}</p>
+                    </div>
+                </div>
+
+            </div>
+        `;
+        document.getElementById('screen-content').innerHTML = content;
+        updateScreenTitle('AQI Details');
+        // Render the prediction chart after content is injected
+        setTimeout(() => renderPredictionChart('predictionChart', details.prediction), 10);
+    }
+
+    function renderPredictionChart(canvasId, predictionData) {
+        const ctx = document.getElementById(canvasId);
+        if (!ctx) return;
+
+        // Custom function to color background based on AQI
+        const getBackgroundColor = (aqi) => getAqiCategory(aqi).color;
+
+        new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: predictionData.map(d => d.hour),
+                datasets: [{
+                    label: 'Predicted AQI',
+                    data: predictionData.map(d => d.aqi),
+                    borderColor: tailwind.config.theme.extend.colors['indigo-600'] || '#4f46e5',
+                    borderWidth: 3,
+                    tension: 0.4,
+                    fill: false,
+                    pointRadius: 6,
+                    pointBackgroundColor: predictionData.map(d => getBackgroundColor(d.aqi)),
+                    pointBorderColor: '#fff',
+                    pointHoverRadius: 8,
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            label: function(context) {
+                                let label = context.dataset.label || '';
+                                if (label) { label += ': '; }
+                                if (context.parsed.y !== null) { label += context.parsed.y; }
+                                return label;
+                            },
+                            title: function(context) {
+                                return `Time: ${context[0].label}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: false,
+                        title: { display: true, text: 'AQI Value' },
+                        grid: { color: 'rgba(200, 200, 200, 0.2)' },
+                    },
+                    x: {
+                        title: { display: true, text: 'Time from Now' },
+                        grid: { display: false }
+                    }
+                }
+            }
+        });
+    }
+
+    function renderTrends(cityId) {
+        const details = getCityDetails(cityId);
+        const content = `
+            <div class="animate-fadeIn space-y-6">
+                <!-- Back Button -->
+                <button onclick="navigateTo('detail', '${cityId}')" class="text-indigo-600 flex items-center mb-4">
+                    ${getIcon('chevron-left', 'w-5 h-5 mr-1')}
+                    <span class="font-medium">Back to ${details.name}</span>
+                </button>
+
+                <h1 class="text-3xl font-bold text-gray-800">Historical Trends for ${details.name}</h1>
+
+                <!-- Filter Tabs -->
+                <div class="flex justify-around bg-gray-100 p-1 rounded-xl shadow-inner">
+                    <button class="flex-1 p-2 text-center text-sm font-medium bg-indigo-600 text-white rounded-lg transition-colors">Day</button>
+                    <button class="flex-1 p-2 text-center text-sm font-medium text-gray-600 hover:bg-white rounded-lg transition-colors">Week</button>
+                    <button class="flex-1 p-2 text-center text-sm font-medium text-gray-600 hover:bg-white rounded-lg transition-colors">Month</button>
+                </div>
+
+                <!-- Main Chart Section -->
+                <div class="bg-white p-4 rounded-xl shadow-xl">
+                    <h2 class="text-xl font-semibold mb-3">AQI Over Past 24 Hours</h2>
+                    <div class="h-64">
+                        <canvas id="historicalChart"></canvas>
+                    </div>
+                    <p class="text-xs text-gray-500 mt-3">Interactive chart: Hover over a point for exact value.</p>
+                </div>
+
+                <!-- Pollutant Trend Toggle (Mock) -->
+                <div class="p-4 rounded-xl bg-indigo-50 border border-indigo-200">
+                    <p class="font-medium text-indigo-800">Pollutant Trends (Mock)</p>
+                    <p class="text-sm text-indigo-700">In a real app, this section would allow selecting individual pollutants (PM2.5, NO2) to overlay on the chart above.</p>
+                </div>
+            </div>
+        `;
+        document.getElementById('screen-content').innerHTML = content;
+        updateScreenTitle('Historical Trends');
+        // Generate mock historical data and render chart
+        setTimeout(() => renderHistoricalChart('historicalChart', details.aqi), 10);
+    }
+
+    function renderHistoricalChart(canvasId, currentAqi) {
+        const ctx = document.getElementById(canvasId);
+        if (!ctx) return;
+
+        // Mock 24 hours data (fluctuating around a center point)
+        const labels = Array.from({ length: 24 }, (_, i) => `${i % 12 || 12}${i < 12 ? 'AM' : 'PM'}`);
+        const data = labels.map((_, i) =>
+            Math.max(30, currentAqi + Math.sin(i / 4) * 50 + (Math.random() - 0.5) * 30)
+        );
+
+        new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: 'Historical AQI',
+                    data: data,
+                    backgroundColor: data.map(aqi => getAqiCategory(aqi).color),
+                    borderRadius: 4,
+                    hoverBackgroundColor: data.map(aqi => getAqiCategory(aqi).color + 'cc'),
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                         callbacks: {
+                            label: function(context) {
+                                return `AQI: ${context.parsed.y}`;
+                            },
+                            title: function(context) {
+                                return `Time: ${context[0].label}`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    y: { beginAtZero: true, title: { display: true, text: 'AQI Value' } },
+                    x: { grid: { display: false }, ticks: { maxRotation: 0, minRotation: 0 } }
+                }
+            }
+        });
+    }
+
+
+    function renderMap() {
+        const cityMarkers = Object.values(MOCK_DATA);
+        const content = `
+            <div class="animate-fadeIn space-y-4 h-full flex flex-col">
+                <h1 class="text-3xl font-bold text-gray-800">AQI Map View</h1>
+                <p class="text-sm text-gray-600">Simulating real-time AQI markers on an interactive map.</p>
+
+                <!-- Simulated Map Container -->
+                <div class="flex-grow bg-gray-200 rounded-xl shadow-xl relative overflow-hidden">
+                    <!-- Placeholder Map Image -->
+                    <img src="https://placehold.co/400x500/A0B9DB/000?text=Interactive+Map+Placeholder" class="w-full h-full object-cover opacity-50" alt="Map Placeholder">
+
+                    <!-- City Markers Overlay -->
+                    ${cityMarkers.map(city => {
+                        const details = getCityDetails(city.id);
+                        const top = Math.random() * 80 + 5; // Random position
+                        const left = Math.random() * 80 + 5;
+                        return `
+                            <div onclick="navigateTo('detail', '${city.id}')"
+                                class="absolute cursor-pointer p-2 rounded-full transform -translate-x-1/2 -translate-y-1/2 transition-all hover:scale-110"
+                                style="top: ${top}%; left: ${left}%;">
+                                <!-- Marker Dot (Color-coded) -->
+                                <div class="w-5 h-5 rounded-full bg-${details.category.color} shadow-lg ring-4 ring-white animate-pulseBg" title="${city.name}: ${city.aqi}"></div>
+                                <!-- Small Info Popup -->
+                                <div class="absolute top-0 right-0 p-1 bg-white rounded-md shadow-md text-xs font-semibold whitespace-nowrap transform translate-x-3 -translate-y-full border-t-2 border-${details.category.color}">
+                                    ${city.name}: ${city.aqi}
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+
+                    <!-- Filter Button (Mock) -->
+                    <button class="absolute bottom-4 left-1/2 transform -translate-x-1/2 bg-white text-gray-800 py-2 px-4 rounded-full shadow-lg flex items-center font-medium hover:bg-gray-50">
+                        ${getIcon('filter', 'w-4 h-4 mr-1')} Filter: Unhealthy
+                    </button>
+                </div>
+            </div>
+        `;
+        document.getElementById('screen-content').innerHTML = content;
+        updateScreenTitle('Map View');
+    }
+
+    function renderCompare() {
+        const compareCities = state.comparisonCities.map(id => getCityDetails(id));
+
+        const content = `
+            <div class="animate-fadeIn space-y-6">
+                <h1 class="text-3xl font-bold text-gray-800">Compare Cities</h1>
+                <p class="text-sm text-gray-600">Compare key metrics side-by-side.</p>
+
+                <!-- City Comparison Grid -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    ${compareCities.map(city => `
+                        <div onclick="navigateTo('detail', '${city.id}')" class="bg-white p-5 rounded-2xl shadow-xl border-t-8 border-${city.category.color} transition-shadow cursor-pointer hover:shadow-2xl">
+                            <div class="flex items-center justify-between">
+                                <h2 class="text-2xl font-bold text-gray-800">${city.name}</h2>
+                                <button class="text-gray-400 hover:text-red-500">${getIcon('x', 'w-5 h-5')}</button>
+                            </div>
+                            <div class="mt-4">
+                                <span class="text-6xl font-extrabold text-${city.category.color} block">${city.aqi}</span>
+                                <span class="text-lg font-medium text-gray-600">${city.category.name}</span>
+                            </div>
+
+                            <div class="mt-4 space-y-2">
+                                <div class="flex items-center justify-between text-sm text-gray-700">
+                                    <span class="flex items-center">${getIcon('cloud-fog', 'w-4 h-4 mr-2')} PM2.5</span>
+                                    <span class="font-semibold">${city.pollutants.find(p => p.name === 'PM2.5').value}</span>
+                                </div>
+                                <div class="flex items-center justify-between text-sm text-gray-700">
+                                    <span class="flex items-center">${getIcon('sun', 'w-4 h-4 mr-2')} Ozone (O3)</span>
+                                    <span class="font-semibold">${city.pollutants.find(p => p.name === 'O3').value}</span>
+                                </div>
+                            </div>
+
+                            <div class="mt-5 p-3 rounded-lg bg-gray-100/70 border border-${city.category.color}/50">
+                                <p class="text-xs font-medium text-gray-800">${city.recommendation.split('.').slice(0, 1).join('.')}.</p>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+
+                <!-- Add City Button (Mock) -->
+                <div class="p-4 border border-dashed border-gray-300 rounded-xl flex items-center justify-center cursor-pointer hover:bg-gray-50 transition-colors">
+                    ${getIcon('plus', 'w-5 h-5 mr-2 text-indigo-600')}
+                    <span class="font-semibold text-indigo-600">Add City for Comparison</span>
+                </div>
+            </div>
+        `;
+        document.getElementById('screen-content').innerHTML = content;
+        updateScreenTitle('Compare Cities');
+    }
+
+    function renderEducational() {
+        const educationContent = [
+            { title: "What is AQI?", icon: "help-circle", content: "The Air Quality Index (AQI) is a measure of how clean or polluted the air is. It ranges from 0 (Good) to 500 (Hazardous). It informs the public about local air quality conditions and associated health risks." },
+            { title: "Key Pollutants Explained", icon: "flask-conical", content: "Key pollutants include PM2.5 (tiny particles that penetrate deep into the lungs), PM10 (coarse particles), Ozone ($O_3$), Nitrogen Dioxide ($NO_2$), Sulfur Dioxide ($SO_2$), and Carbon Monoxide ($CO$). Each affects health differently." },
+            { title: "Health Impact & Safety Tips", icon: "heart-handshake", content: "Depending on the AQI level, different health impacts occur. For Unhealthy levels (151+), everyone should limit outdoor activity. Always follow recommendations like wearing a mask or using an air purifier." },
+        ];
+
+        const content = `
+            <div class="animate-fadeIn space-y-6">
+                <h1 class="text-3xl font-bold text-gray-800">Air Quality Education Hub</h1>
+                <p class="text-sm text-gray-600">Understanding the air you breathe is the first step towards a solution.</p>
+
+                <!-- Accordion/Expandable Sections -->
+                <div class="space-y-3">
+                    ${educationContent.map((item, index) => `
+                        <div class="bg-white rounded-xl shadow-md overflow-hidden">
+                            <button class="w-full flex justify-between items-center p-4 font-semibold text-left text-lg text-gray-800 hover:bg-gray-50 transition-colors"
+                                onclick="toggleAccordion('edu-panel-${index}')">
+                                <span class="flex items-center">
+                                    ${getIcon(item.icon, 'w-5 h-5 mr-3 text-indigo-600')}
+                                    ${item.title}
+                                </span>
+                                ${getIcon('chevron-down', 'w-5 h-5 text-gray-500 transform transition-transform duration-300')}
+                            </button>
+                            <div id="edu-panel-${index}" class="px-4 pb-4 text-gray-700 hidden">
+                                <p class="text-sm">${item.content}</p>
+                            </div>
+                        </div>
+                    `).join('')}
+                </div>
+
+                <!-- SIH Callout -->
+                <div class="p-5 rounded-xl bg-indigo-50 border border-indigo-200 mt-6 text-center">
+                    <p class="text-lg font-bold text-indigo-800">Smart India Hackathon 2024</p>
+                    <p class="text-sm text-indigo-700 mt-1">Our mission: Using predictive analytics for a healthier India.</p>
+                </div>
+            </div>
+        `;
+        document.getElementById('screen-content').innerHTML = content;
+        updateScreenTitle('Education');
+    }
+
+    function renderSettings() {
+        const content = `
+            <div class="animate-fadeIn space-y-6">
+                <h1 class="text-3xl font-bold text-gray-800">Settings</h1>
+
+                <!-- App Preferences -->
+                <div class="bg-white p-5 rounded-xl shadow-md space-y-3">
+                    <h2 class="text-xl font-semibold mb-3 border-b pb-2">App Preferences</h2>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-700 flex items-center">${getIcon('bell', 'w-5 h-5 mr-2')} Air Quality Alerts</span>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" value="" class="sr-only peer" checked>
+                            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                        </label>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-gray-700 flex items-center">${getIcon('map-pin', 'w-5 h-5 mr-2')} Use Current Location</span>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" value="" class="sr-only peer">
+                            <div class="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-indigo-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-indigo-600"></div>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Favorites Management (Simplified) -->
+                <div class="bg-white p-5 rounded-xl shadow-md space-y-3">
+                    <h2 class="text-xl font-semibold mb-3 border-b pb-2">Manage Favorites</h2>
+                    ${state.favorites.map(id => MOCK_DATA[id]).map(city => `
+                        <div class="flex justify-between items-center py-2 border-b last:border-b-0">
+                            <span class="text-gray-700">${city.name}</span>
+                            <button onclick="removeFavorite('${city.id}')" class="text-red-500 hover:text-red-700 p-1 rounded-full">${getIcon('trash-2', 'w-5 h-5')}</button>
+                        </div>
+                    `).join('')}
+                    <button class="w-full text-center py-2 mt-2 font-medium text-indigo-600 border border-indigo-600 rounded-lg hover:bg-indigo-50 transition-colors">
+                        Add New Favorite
+                    </button>
+                </div>
+
+                <!-- About -->
+                <button onclick="navigateTo('education')" class="w-full bg-white p-4 rounded-xl shadow-md flex items-center justify-between text-gray-700 hover:bg-gray-50">
+                    <span class="flex items-center font-medium">${getIcon('info', 'w-5 h-5 mr-2')} Educational Section</span>
+                    ${getIcon('chevron-right', 'w-5 h-5')}
+                </button>
+            </div>
+        `;
+        document.getElementById('screen-content').innerHTML = content;
+        updateScreenTitle('Settings');
+    }
+
+    // --- Interaction Handlers ---
+
+    function navigateTo(screen, cityId = state.selectedCityId) {
+        state.currentScreen = screen;
+        state.selectedCityId = cityId;
+        renderApp();
+    }
+
+    function toggleAccordion(panelId) {
+        const panel = document.getElementById(panelId);
+        const button = panel.previousElementSibling.querySelector('svg:last-child');
+        const isHidden = panel.classList.contains('hidden');
+
+        // Close all panels
+        document.querySelectorAll('[id^="edu-panel-"]').forEach(p => {
+            p.classList.add('hidden');
+            p.previousElementSibling.querySelector('svg:last-child').classList.remove('rotate-180');
+        });
+
+        // Toggle selected panel
+        if (isHidden) {
+            panel.classList.remove('hidden');
+            button.classList.add('rotate-180');
+        } else {
+            panel.classList.add('hidden');
+            button.classList.remove('rotate-180');
+        }
+    }
+
+    function removeFavorite(cityId) {
+        state.favorites = state.favorites.filter(id => id !== cityId);
+        // Only rerender settings if the user is on the settings screen
+        if (state.currentScreen === 'settings') {
+            renderApp();
+        } else if (state.currentScreen === 'home') {
+            renderApp();
+        }
+    }
+
+    function selectCityFromSearch(cityName) {
+        state.searchQuery = cityName;
+        const cityId = Object.keys(MOCK_DATA).find(key => MOCK_DATA[key].name === cityName);
+        if (cityId) {
+            // Check if city is already a favorite, if not, add it for better user experience
+            if (!state.favorites.includes(cityId)) {
+                state.favorites.unshift(cityId); // Add to start
+                state.favorites = [...new Set(state.favorites)]; // Ensure uniqueness
+            }
+            navigateTo('detail', cityId);
+        }
+        // Hide autocomplete
+        document.getElementById('autocomplete-results').classList.add('hidden');
+    }
+
+    function handleSearchInput(event) {
+        state.searchQuery = event.target.value.toLowerCase();
+        const resultsContainer = document.getElementById('autocomplete-results');
+
+        if (state.searchQuery.length < 2) {
+            resultsContainer.classList.add('hidden');
+            return;
+        }
+
+        const filtered = state.autoSuggestList.filter(name =>
+            name.toLowerCase().includes(state.searchQuery)
+        );
+
+        resultsContainer.innerHTML = filtered.map(name => `
+            <div class="px-4 py-3 text-gray-700 hover:bg-indigo-50 cursor-pointer" onclick="selectCityFromSearch('${name}')">
+                ${name}
+            </div>
+        `).join('');
+
+        if (filtered.length > 0) {
+            resultsContainer.classList.remove('hidden');
+        } else {
+            resultsContainer.classList.add('hidden');
+        }
+    }
+
+    function updateScreenTitle(title) {
+        // This function is for internal dev tracking/visual consistency, not a part of the user's requirement.
+        // document.title = \`AQI App | \${title}\`;
+    }
+
+    // --- Main App Renderer ---
+
+    function renderApp() {
+        // Clear old chart instances to prevent memory leaks
+        Chart.getChart("predictionChart")?.destroy();
+        Chart.getChart("historicalChart")?.destroy();
+
+        // 1. Render the main screen content
+        switch (state.currentScreen) {
+            case 'detail': renderDetail(state.selectedCityId); break;
+            case 'trends': renderTrends(state.selectedCityId); break;
+            case 'map': renderMap(); break;
+            case 'compare': renderCompare(); break;
+            case 'education': renderEducational(); break;
+            case 'settings': renderSettings(); break;
+            case 'home':
+            default: renderHome(); break;
+        }
+
+        // 2. Render the Navigation Bar
+        const navItems = [
+            { id: 'home', icon: 'home', label: 'Home' },
+            { id: 'map', icon: 'map', label: 'Map' },
+            { id: 'trends', icon: 'activity', label: 'Trends' },
+            { id: 'compare', icon: 'columns-3', label: 'Compare' },
+            { id: 'settings', icon: 'settings', label: 'Settings' }
+        ];
+
+        const navHtml = navItems.map(item => {
+            const isActive = state.currentScreen === item.id;
+            const colorClass = isActive ? 'text-indigo-600' : 'text-gray-500 hover:text-indigo-600';
+            const bgClass = isActive ? 'bg-indigo-50' : 'bg-transparent';
+
+            return `
+                <button onclick="navigateTo('${item.id}')" class="flex flex-col items-center justify-center p-2 rounded-xl transition-colors ${colorClass} ${bgClass}">
+                    ${getIcon(item.icon, 'w-6 h-6')}
+                    <span class="text-xs mt-0.5 font-medium">${item.label}</span>
+                </button>
+            `;
+        }).join('');
+
+        document.getElementById('nav-bar').innerHTML = navHtml;
+    }
+
+    // Initialize the application when the window loads
+    window.onload = function() {
+        renderApp();
+    };
+
+</script>
+
+<!-- Initialize Lucide icons for the first time -->
+<script>
+    lucide.createIcons();
+</script>
+
+</body>
+</html>
